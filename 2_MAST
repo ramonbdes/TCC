@@ -1,0 +1,213 @@
+##############################################################
+# Análise MAST global e por cluster 
+# Genes: GFAP, CHI3L1, S100B, MAOB, TREM2, TSPO
+##############################################################
+# Pacotes
+# ============================================================
+library(Seurat)
+library(MAST)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(pheatmap)
+library(textshape)
+
+
+obj.seurat <- NormalizeData(obj.seurat, assay = 'RNA',
+                            normalization.method = "LogNormalize",
+                            scale.factor = 10000)
+# Genes de interesse
+# ============================================================
+genes_interest <- c("GFAP", "CHI3L1", "S100B", "MAOB", "TREM2", "TSPO")
+
+# 1. Análise global 
+# ============================================================
+marker_genes <- subset(obj.seurat, features = genes_interest)
+
+global_mast <- FindMarkers(
+  object = marker_genes,
+  assay = 'RNA',
+  ident.1 = "4",   
+  ident.2 = "1",   
+  group.by = "cogdx",
+  test.use = "MAST",
+  logfc.threshold = 0,
+  min.pct = 0
+)
+
+global_mast$comparison <- "Global"
+global_mast$gene <- rownames(global_mast)
+
+# ============================================================
+# 2. Análise por tipo celular (state)
+# ============================================================
+results_list <- list()
+
+for (ct in unique(obj.seurat$state)) {
+  
+  sub <- subset(obj.seurat, subset = state == ct)
+  
+  if (ncol(sub) == 0) {
+    message(" Nenhuma célula neste tipo, pulando...")
+    next
+  }
+  
+  # Subset para genes de interesse
+  genes_present <- genes_interest[genes_interest %in% rownames(sub)]
+  if (length(genes_present) == 0) {
+    message(" Nenhum gene presente neste tipo, pulando...")
+    next
+  }
+  sub <- subset(sub, features = genes_present)
+  
+  # Rodar MAST
+  res <- tryCatch({
+    FindMarkers(
+      object = sub,
+      assay = 'RNA',
+      ident.1 = "4",  # CI
+      ident.2 = "1",  # CU
+      group.by = "cogdx",
+      test.use = "MAST",
+      logfc.threshold = 0,
+      min.pct = 0
+    )
+    
+  }, error = function(e) {
+    message("Erro em ", ct, ": ", e$message)
+    return(NULL)
+  })
+  
+  if (is.null(res) || nrow(res) == 0) {
+    message(" Resultados vazios, pulando state...")
+    next
+  }
+  
+  res$state <- ct
+  res$gene <- rownames(res)
+  results_list[[ct]] <- res
+}
+
+# Combinar resultados
+cluster_results <- bind_rows(results_list)
+
+# ============================================================
+# 3. Salvar resultados
+# ============================================================
+write.csv(global_mast, "obj.seurat.MAST_global_results.csv", row.names = FALSE)
+write.csv(cluster_results, "obj.seurat.MAST_cluster_results.csv", row.names = FALSE)
+
+# 4. Preparação dos Dados para Plotar
+# ============================================================
+
+# Define a ordem dos genes (do seu script anterior)
+genes_interest_ordered <- rev(c("GFAP", MAOB", "CHI3L1", "S100B", " "TREM2", "TSPO"))
+
+# Define a escala de cor (Log2 Fold Change). 
+max_abs_logfc <- 1.0 
+color_limits <- c(-max_abs_logfc, max_abs_logfc)
+
+# Função auxiliar para adicionar os asteriscos de significância
+add_significance_asterisks <- function(p_value) {
+  if (is.na(p_value)) {
+    return("")
+  }
+  if (p_value < 0.001) {
+    return("***")
+  }
+  if (p_value < 0.01) {
+    return("**")
+  }
+  if (p_value < 0.05) {
+    return("*")
+  }
+  return("")
+}
+
+# ============================================================
+# 5. Plot 1: Heatmap de Resultados GLOBAIS
+# ============================================================
+# Processar o data frame 'global_mast'
+plot_data_global <- global_mast %>%
+  filter(gene %in% genes_interest) %>%
+  mutate(
+    # Adiciona a coluna de asteriscos
+    asterisk = sapply(p_val_adj, add_significance_asterisks),
+    # Força a ordem dos genes no eixo Y
+    gene = factor(gene, levels = genes_interest_ordered)
+  )
+
+# Criar o plot
+heatmap_global <- ggplot(plot_data_global, aes(x = comparison, y = gene, fill = avg_log2FC)) +
+  geom_tile(color = "black", linewidth = 0.5) + # Células do heatmap
+  geom_text(aes(label = asterisk), color = "black", size = 6, vjust = 0.7) + # Asteriscos
+  
+  # Aplica a escala de cor fixa (azul/vermelho) e "esmaga" valores extremos (squish)
+  scale_fill_gradient2(
+    low = "blue", mid = "white", high = "red",
+    midpoint = 0,
+    limit = color_limits,
+    oob = scales::squish # Importante para manter a escala
+  ) +
+  
+  labs(
+    title = "ED Global",
+    x = "Comparação",
+    y = "Gene",
+    fill = "avg_log2FC"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank() 
+  )
+
+print(heatmap_global)
+
+# Salvar o plot
+# ggsave("MAST_global_heatmap.png", plot = heatmap_global, width = 5, height = 6, dpi = 300)
+
+
+# ============================================================
+# 6. Plot 2: Heatmap de Resultados por TIPO CELULAR
+# ============================================================
+
+# Processar o data frame 'cluster_results'
+plot_data_cluster <- cluster_results %>%
+  filter(gene %in% genes_interest) %>%
+  mutate(
+    # Adiciona a coluna de asteriscos
+    asterisk = sapply(p_val_adj, add_significance_asterisks),
+    # Força a ordem dos genes no eixo Y
+    gene = factor(gene, levels = genes_interest_ordered)
+  )
+
+# Criar o plot
+heatmap_cluster <- ggplot(plot_data_cluster, aes(x = state, y = gene, fill = avg_log2FC)) +
+  geom_tile(color = "black", linewidth = 0.5) + # Células do heatmap
+  geom_text(aes(label = asterisk), color = "black", size = 5, vjust = 0.7) + # Asteriscos
+  
+  scale_fill_gradient2(
+    low = "blue", mid = "white", high = "red",
+    midpoint = 0,
+    limit = color_limits,
+    oob = scales::squish
+  ) +
+  
+  labs(
+    title = "ED por Subtipo Celular (CogDX 4 vs 1)",
+    x = "Subtipo Celular",
+    y = "Gene",
+    fill = "avg_log2FC"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+print(heatmap_cluster)
+
+# Salvar o plot
+# ggsave("MAST_cluster_heatmap.png", plot = heatmap_cluster, width = 12, height = 6, dpi = 300)
+
