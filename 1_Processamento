@@ -1,0 +1,145 @@
+library(Seurat)
+library(SeuratDisk)
+library(dplyr)
+library(readr)
+
+# 1. CARREGAR E PREPARAR DADOS
+# =======================================================
+obj.seurat <- LoadH5Seurat("vascular.niche.h5Seurat", assays = NULL, 
+                          reductions = NULL, images = FALSE, 
+                         meta.data = TRUE, graphs = FALSE)
+
+# 2. METADADOS
+# =======================================================
+# Carregar os metadados ROSMAP
+metadata_pacientes <- read_csv("ROSMAP_clinical.csv")
+metadata_pacientes <- metadata_pacientes %>%
+  select(individualID, cogdx, braaksc, msex, apoe_genotype, ceradsc) %>% 
+  mutate(individualID = as.character(individualID),
+         cogdx = as.character(cogdx))
+  
+# 2.1 DISCRETIZAÇÃO DE VARIÁVEIS
+# -------------------------------------------------------
+metadata_pacientes <- metadata_pacientes %>%
+  mutate(APOE_E4_CARRIER = case_when(
+      apoe_genotype %in% c(24, 34, 44) ~ "Carrier",
+      apoe_genotype %in% c(22, 23, 33) ~ "Non-Carrier",
+      TRUE ~ NA_character_)) %>%mutate(
+    BRAAK_GROUP = case_when(
+      braaksc %in% c(1, 2) ~ "B1-2_Baixo",
+      braaksc %in% c(3, 4) ~ "B3-4_Medio",
+      braaksc %in% c(5, 6) ~ "B5-6_Alto",
+      TRUE ~ NA_character_)) %>%mutate(
+    grupo_interesse = case_when(
+      cogdx %in% c("1.0", "4.0", "1", "4") ~ "CS_e_DA",
+      TRUE ~ "outros"))
+
+
+# 2.2 MAPEAMENTO PARA O OBJETO SEURAT
+# -------------------------------------------------------
+obj.seurat@meta.data <- obj.seurat@meta.data %>%
+  tibble::rownames_to_column(var = "cell_barcode") %>%
+  left_join(metadata_pacientes, by = "individualID") %>%
+  tibble::column_to_rownames(var = "cell_barcode")
+
+# 3. FILTRAGEM FINAL PARA COGDX 1.0 E 4.0
+# =======================================================
+# Assegurar que 'cogdx' seja um fator/caractere para a filtragem
+obj.seurat@meta.data$cogdx <- obj.seurat@meta.data$cogdx %>% as.character()
+# Criar a lista de barcodes (nomes de colunas) para cada grupo
+Idents(obj.seurat) <- "cogdx"
+cells_ctrl <- WhichCells(obj.seurat, idents = "1")
+cells_da <- WhichCells(obj.seurat, idents = "4")
+DA <- "Outros" 
+obj.seurat$DA <- DA
+obj.seurat$DA[cells_da] <- "DA"
+CS <- "Outros"
+obj.seurat$CS <- CS
+obj.seurat$CS[cells_ctrl] <- "CS"
+
+  
+# 4. GERAÇÃO DOS UMAPs 
+# =======================================================
+# A. UMAP 1: VISÃO GERAL DOS CLUSTERS
+umap1  <- DimPlot(
+  obj.seurat, 
+  reduction = "umap", 
+  group.by = "state", 
+  label = TRUE, 
+  repel = TRUE,
+  pt.size = 0.5,
+  alpha = 0.6,
+  raster = FALSE
+) + ggtitle("A. Subtipos Celulares")
+
+ggsave("UMAP.png", plot = umap1, width = 10, height = 8, dpi = 300)
+
+# B. UMAP 2: REALCE DE CS (CogDX 1.0)
+umap2 <- DimPlot(
+  obj.seurat,
+  alpha = 0.6,
+  reduction = "umap", 
+  group.by = 'CS',
+  cols = c('CS' = "darkgreen", "Outros" = "darkgrey"),
+  pt.size = 0.5, , raster = FALSE) + 
+  ggtitle("B. Células de indivíduos Cognitivamente Saudáveis (CS)") +
+  theme(legend.position = "right") 
+umap_plot_com_labels <- DimPlot(obj.seurat,reduction = "umap",group.by = "state",  
+  label = TRUE, repel = TRUE, pt.size = 0, label.size = 4
+  #fontface = "bold"
+  ) + NoLegend()
+umap2 <- umap2 + umap_plot_com_labels$layers[[2]]
+umap2
+ggsave("UMAP2.png", plot = umap2, width = 10, height = 8, dpi = 300)
+
+# C. UMAP 3: REALCE DE AD (CogDX 4.0)
+umap3 <- DimPlot(
+  obj.seurat, 
+  reduction = "umap",
+  alpha = 0.6,
+  group.by = "DA",
+  cols = c('DA' = "purple", "Outros" = "darkgrey"),
+  pt.size = 0.5, raster = FALSE
+) + 
+  ggtitle("C. Células de indivíduos com Doença de Alzheimer (DA)") +
+  theme(legend.position = "right")
+umap3 <- umap3 + umap_plot_com_labels$layers[[2]]
+umap3
+ggsave("UMAP3.png", plot = umap3, width = 10, height = 8, dpi = 300)
+
+# D. sDC e AD x outros
+obj.seurat$grupo_interesse <- factor(obj.seurat$grupo_interesse, levels = c("CS_e_DA", "outros"))
+custom_colors <- c("CS_e_DA" = "#007acc", "outros" = "darkgrey")
+umap_plot_base <- DimPlot(
+  obj.seurat,
+  reduction = "umap",
+  group.by = "grupo_interesse",
+  cols = custom_colors,
+  pt.size = 0.5,
+  alpha = 0.6,
+  order = "CS_e_DA",
+  raster = FALSE,
+) + theme(legend.position = 'right')
+
+# 2. Adiciona os rótulos dos clusters (da coluna 'state') sobre o gráfico de base
+umap_plot_com_labels <- DimPlot(
+  obj.seurat,
+  reduction = "umap",
+  group.by = "state",  
+  label = TRUE,        
+  repel = TRUE,        
+  pt.size = 0,         
+  label.size = 4
+  #fontface = "bold"
+) + NoLegend()
+
+# 3. Combina as duas camadas de plotagem
+plot_final <- umap_plot_base + umap_plot_com_labels$layers[[2]]
+# 4. Adiciona o título final e ajusta o tema
+plot_final <- plot_final +
+  ggtitle("Destaque de Células de Interesse") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+plot_final
+
+# Salvar o gráfico
+ggsave("UMAP4.png", plot = plot_final, width = 10, height = 8, dpi = 300)
