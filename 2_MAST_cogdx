@@ -1,0 +1,314 @@
+##############################################################
+# Análise MAST global e por cluster (state)
+# Agrupamento: Diagnóstico Cognitivo (cogdx)
+# Comparação: cogdx 1 (Controle) vs cogdx 4 (DA)
+# Estratificação: 1º Tipo Celular, 2º Estágio de Progressão
+# Genes: GFAP, CHI3L1, S100B, MAOB, TREM2, TSPO
+##############################################################
+
+# ============================================================
+# 0. Configurações
+# ============================================================
+coluna_cogdx    <- "cogdx"
+coluna_celltype <- "cell_type"
+
+# Limiar mínimo de células por grupo
+MIN_CELLS_PER_GROUP <- 10
+
+#Diretório de saída
+OUTPUT_DIR <- "resultados_MAST_cogdx"
+dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+# Comparação única: cogdx 4 (DA) vs cogdx 1 (Controle)
+lista_comparacoes <- list(
+  "DA_vs_Controle" = c(alvo = "4", controle = "1")
+)
+
+# ============================================================
+# Pacotes
+# ============================================================
+library(Seurat)
+library(MAST)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+# Genes de interesse
+genes_interest         <- c("GFAP", "CHI3L1", "S100B", "MAOB", "TREM2", "TSPO", "CHRFAM7A")
+genes_interest_ordered <- rev(genes_interest)
+max_abs_logfc          <- 1.0
+color_limits           <- c(-max_abs_logfc, max_abs_logfc)
+
+# Função de asteriscos
+add_significance_asterisks <- function(p_value) {
+  if (is.na(p_value)) return("")
+  if (p_value < 0.001) return("***")
+  if (p_value < 0.01)  return("**")
+  if (p_value < 0.05)  return("*")
+  return("")
+}
+
+#Sanitização de nomes de arquivo
+sanitize_name <- function(x) {
+  gsub("[^A-Za-z0-9_]", "_", x)
+}
+
+# ============================================================
+# Garantir que cogdx está como character para o group.by
+# ============================================================
+obj_merged[[coluna_cogdx]][, 1] <- as.character(obj_merged[[coluna_cogdx]][, 1])
+
+# ============================================================
+# Loop Nível 1: Comparação
+# ============================================================
+for (nome_comp in names(lista_comparacoes)) {
+
+  grupo_alvo     <- lista_comparacoes[[nome_comp]]["alvo"]
+  grupo_controle <- lista_comparacoes[[nome_comp]]["controle"]
+
+  message("\n\n███████████████████████████████████████████████")
+  message(" INICIANDO COMPARAÇÃO: ", nome_comp)
+  message(" Ident.1 (cogdx = ", grupo_alvo,
+          ") vs Ident.2 (cogdx = ", grupo_controle, ")")
+  message("███████████████████████████████████████████████")
+
+  # ============================================================
+  # Loop Nível 2: Tipo Celular
+  # ============================================================
+  tipos_celulares <- unique(obj_merged[[coluna_celltype]][, 1])
+  tipos_celulares <- tipos_celulares[!is.na(tipos_celulares)]
+
+  for (ctype in tipos_celulares) {
+
+    message("\n-----------------------------------------------")
+    message("   Analisando Célula: ", ctype)
+    message("-----------------------------------------------")
+
+    Idents(obj_merged) <- coluna_celltype
+    obj_ct <- subset(obj_merged, idents = ctype)
+
+    ctype_name      <- sanitize_name(ctype)                       
+    prefixo_arquivo <- file.path(                              
+      OUTPUT_DIR,
+      paste0("MAST_cogdx_", nome_comp, "_", ctype_name)
+    )
+
+    # ----------------------------------------------------------
+    # 1. Análise Global
+    # ----------------------------------------------------------
+    message("   -> Rodando MAST Global...")
+
+    # Verificar células mínimas no nível global
+    cogdx_vals_global <- obj_ct[[coluna_cogdx]][, 1]
+    n_alvo_global     <- sum(cogdx_vals_global == grupo_alvo,     na.rm = TRUE)
+    n_controle_global <- sum(cogdx_vals_global == grupo_controle, na.rm = TRUE)
+
+    global_mast <- NULL
+
+    if (n_alvo_global < MIN_CELLS_PER_GROUP || n_controle_global < MIN_CELLS_PER_GROUP) {
+      message("      [PULADO] Global ", ctype,
+              ": células insuficientes (",
+              n_alvo_global, " vs ", n_controle_global,
+              "; mínimo = ", MIN_CELLS_PER_GROUP, ")")
+    } else {
+      genes_present_global <- genes_interest[genes_interest %in% rownames(obj_ct)]
+
+      global_mast <- tryCatch({
+        FindMarkers(
+          object          = obj_ct,
+          features        = genes_present_global,
+          assay           = "RNA",
+          ident.1         = grupo_alvo,
+          ident.2         = grupo_controle,
+          group.by        = coluna_cogdx,
+          test.use        = "MAST",
+          logfc.threshold = 0,
+          min.pct         = 0
+        )
+      }, error = function(e) {
+        message("      Erro no Global ", ctype, ": ", e$message)
+        return(NULL)
+      })
+
+      if (!is.null(global_mast) && nrow(global_mast) > 0) {
+        global_mast$comparison <- "Global"
+        global_mast$gene       <- rownames(global_mast)
+        global_mast$cell_type  <- ctype
+      }
+    }
+
+    # ----------------------------------------------------------
+    # 2. Análise por State
+    # ----------------------------------------------------------
+    results_list       <- list()
+    states_disponiveis <- unique(obj_ct$state)
+    states_disponiveis <- states_disponiveis[!is.na(states_disponiveis)]
+
+    for (st in states_disponiveis) {
+      message("      Analisando state: ", st)
+      sub <- subset(obj_ct, subset = state == st)
+
+      if (ncol(sub) == 0) next
+
+      # [C1] Verificar células mínimas por grupo dentro do state
+      cogdx_vals <- sub[[coluna_cogdx]][, 1]
+      n_alvo     <- sum(cogdx_vals == grupo_alvo,     na.rm = TRUE)
+      n_controle <- sum(cogdx_vals == grupo_controle, na.rm = TRUE)
+
+      if (n_alvo < MIN_CELLS_PER_GROUP || n_controle < MIN_CELLS_PER_GROUP) {
+        message("         [PULADO] state ", st,
+                ": células insuficientes (",
+                n_alvo, " vs ", n_controle,
+                "; mínimo = ", MIN_CELLS_PER_GROUP, ")")
+        next
+      }
+
+      genes_present <- genes_interest[genes_interest %in% rownames(sub)]
+      if (length(genes_present) == 0) next
+
+      res <- tryCatch({
+        FindMarkers(
+          object          = sub,
+          features        = genes_present,
+          assay           = "RNA",
+          ident.1         = grupo_alvo,
+          ident.2         = grupo_controle,
+          group.by        = coluna_cogdx,
+          test.use        = "MAST",
+          logfc.threshold = 0,
+          min.pct         = 0
+        )
+      }, error = function(e) {
+        message("         Erro no state ", st, ": ", e$message)
+        return(NULL)
+      })
+
+      if (is.null(res) || nrow(res) == 0) next
+
+      res$state     <- st
+      res$gene      <- rownames(res)
+      res$cell_type <- ctype
+      results_list[[st]] <- res
+    }
+
+    cluster_results <- bind_rows(results_list)
+
+    # ----------------------------------------------------------
+    #Correção Global de Múltiplos Testes (BH sobre p_val bruto)
+    # ----------------------------------------------------------
+    if (nrow(cluster_results) > 0) {
+      cluster_results <- cluster_results %>%
+        mutate(
+          p_val_adj_global = p.adjust(p_val, method = "BH"),
+          asterisk_global  = sapply(p_val_adj_global, add_significance_asterisks)
+        )
+    }
+
+    # ----------------------------------------------------------
+    # 3. Salvar Resultados
+    # ----------------------------------------------------------
+    if (!is.null(global_mast) && nrow(global_mast) > 0) {
+      write.csv(global_mast,
+                paste0(prefixo_arquivo, "_Global.csv"),
+                row.names = FALSE)
+    }
+
+    if (nrow(cluster_results) > 0) {
+      write.csv(cluster_results,
+                paste0(prefixo_arquivo, "_Cluster.csv"),
+                row.names = FALSE)
+    }
+
+    # ----------------------------------------------------------
+    # 4. Plotagem Global
+    # ----------------------------------------------------------
+    if (!is.null(global_mast) && nrow(global_mast) > 0) {
+      plot_data_global <- global_mast %>%
+        filter(gene %in% genes_interest) %>%
+        mutate(
+          asterisk = sapply(p_val_adj, add_significance_asterisks),
+          gene     = factor(gene, levels = genes_interest_ordered)
+        )
+
+      titulo_global <- paste0(
+        "DE Global - ", ctype,
+        "\n(cogdx 4 [DA] vs cogdx 1 [Controle])"
+      )
+
+      heatmap_global <- ggplot(
+        plot_data_global,
+        aes(x = comparison, y = gene, fill = avg_log2FC)
+      ) +
+        geom_tile(color = "black", linewidth = 0.5) +
+        geom_text(aes(label = asterisk), color = "black", size = 6, vjust = 0.7) +
+        scale_fill_gradient2(
+          low = "blue", mid = "white", high = "red",
+          midpoint = 0, limit = color_limits, oob = scales::squish
+        ) +
+        labs(
+          title = titulo_global,
+          x     = "Comparação",
+          y     = "Gene",
+          fill  = "avg_log2FC"
+        ) +
+        theme_minimal(base_size = 14) +
+        theme(
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.grid  = element_blank()
+        )
+
+      print(heatmap_global)
+      ggsave(                                                     
+        paste0(prefixo_arquivo, "_Global.png"),
+        plot = heatmap_global, width = 5, height = 6, dpi = 300
+      )
+    }
+
+    # ----------------------------------------------------------
+    # 5. Plotagem por Cluster — asteriscos do FDR GLOBAL 
+    # ----------------------------------------------------------
+    if (nrow(cluster_results) > 0) {
+      plot_data_cluster <- cluster_results %>%
+        filter(gene %in% genes_interest) %>%
+        mutate(gene = factor(gene, levels = genes_interest_ordered))
+
+      titulo_cluster <- paste0(
+        "DE por State - ", ctype,
+        "\n(cogdx 4 [DA] vs cogdx 1 [Controle])",
+        "\n* = FDR global (BH)"
+      )
+
+      heatmap_cluster <- ggplot(
+        plot_data_cluster,
+        aes(x = state, y = gene, fill = avg_log2FC)
+      ) +
+        geom_tile(color = "black", linewidth = 0.5) +
+        geom_text(aes(label = asterisk_global),                   
+                  color = "black", size = 5, vjust = 0.7) +
+        scale_fill_gradient2(
+          low = "blue", mid = "white", high = "red",
+          midpoint = 0, limit = color_limits, oob = scales::squish
+        ) +
+        labs(
+          title = titulo_cluster,
+          x     = "Subtipo Celular (State)",
+          y     = "Gene",
+          fill  = "avg_log2FC"
+        ) +
+        theme_minimal(base_size = 14) +
+        theme(
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.grid  = element_blank()
+        )
+
+      print(heatmap_cluster)
+      ggsave(                                                     
+        paste0(prefixo_arquivo, "_Cluster.png"),
+        plot = heatmap_cluster, width = 10, height = 6, dpi = 300
+      )
+    }
+  }
+}
+
+message("\nPipeline cogdx finalizado com sucesso!")
