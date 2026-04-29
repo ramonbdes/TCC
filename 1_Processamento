@@ -1,15 +1,39 @@
+# ── 1. Define as duas libs ──────────────────────────────
+lib4 <- "~/R_libs/seurat4"
+lib5 <- "~/R_libs/seurat5"
+
+# ── 2. Leitura com Seurat 4 ─────────────────────────────
+.libPaths(c(lib4, .libPaths()))
 library(Seurat)
 library(SeuratDisk)
+
+obj <- LoadH5Seurat("Dados/microglia.h5Seurat",
+                    assays = NULL, reductions = NULL,
+                    images = FALSE, meta.data = TRUE)
+
+# ── 3. Descarrega os pacotes da v4 ──────────────────────
+detach("package:SeuratDisk",   unload = TRUE) 
+detach("package:Seurat",       unload = TRUE)
+detach("package:SeuratObject", unload = TRUE)  
+
+# ── 4. Troca para Seurat 5 ──────────────────────────────
+.libPaths(c(lib5, .libPaths()[.libPaths() != lib4]))
+library(Seurat)  
+
+# ── 5. Migra estrutura v4 → v5 ──────────────────────────
+obj <- UpdateSeuratObject(obj)  
+
+# ============================================================
+# PACOTES ADICIONAIS
+# ============================================================
 library(dplyr)
 library(readr)
+library(ggplot2)
 
-# 1. CARREGAR E PREPARAR DADOS
-# =======================================================
-obj.seurat <- LoadH5Seurat("vascular.niche.h5Seurat", assays = NULL, 
-                          reductions = NULL, images = FALSE, 
-                         meta.data = TRUE, graphs = FALSE)
-
-# 2. METADADOS
+# ============================================================
+# 0. CONFIGURAÇÕES
+# ============================================================
+# 1. METADADOS
 # =======================================================
 # Carregar os metadados ROSMAP
 metadata_pacientes <- read_csv("ROSMAP_clinical.csv")
@@ -17,8 +41,7 @@ metadata_pacientes <- metadata_pacientes %>%
   select(individualID, cogdx, braaksc, msex, apoe_genotype, ceradsc) %>% 
   mutate(individualID = as.character(individualID),
          cogdx = as.character(cogdx))
-  
-# 2.1 DISCRETIZAÇÃO DE VARIÁVEIS
+# 1.1 CRIAÇÃO DE NOVAS COLUNAS AGRUPADAS
 # -------------------------------------------------------
 metadata_pacientes <- metadata_pacientes %>%
   mutate(APOE_E4_CARRIER = case_when(
@@ -56,9 +79,8 @@ obj.seurat$DA[cells_da] <- "DA"
 CS <- "Outros"
 obj.seurat$CS <- CS
 obj.seurat$CS[cells_ctrl] <- "CS"
-
-  
-# 4. GERAÇÃO DOS UMAPs 
+# =======================================================
+# 4. GERAÇÃO DOS UMAPs (Realce e Filtragem)
 # =======================================================
 # A. UMAP 1: VISÃO GERAL DOS CLUSTERS
 umap1  <- DimPlot(
@@ -74,7 +96,7 @@ umap1  <- DimPlot(
 
 ggsave("UMAP.png", plot = umap1, width = 10, height = 8, dpi = 300)
 
-# B. UMAP 2: REALCE DE CS (CogDX 1.0)
+# B. UMAP 2: REALCE DE sDC (CogDX 1.0)
 umap2 <- DimPlot(
   obj.seurat,
   alpha = 0.6,
